@@ -1,10 +1,12 @@
 package com.eventostec.api.service;
 
 import com.amazonaws.services.s3.AmazonS3;
+import com.eventostec.api.domain.coupon.Coupon;
 import com.eventostec.api.domain.event.Event;
+import com.eventostec.api.domain.event.EventDetailsDTO;
 import com.eventostec.api.domain.event.EventRequestDTO;
 import com.eventostec.api.domain.event.EventResponseDTO;
-import com.eventostec.api.resitories.EventRepository;
+import com.eventostec.api.repositories.EventRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
@@ -20,24 +22,30 @@ import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 public class EventService {
 
-    @Value("${aws.bucket.name")
+    @Value("${aws.bucket.name}")
     private String bucketName;
 
     @Autowired
     private AmazonS3 s3Client;
 
     @Autowired
-    private EventRepository eventRepository;
+    private AddressService addressService;
 
+    @Autowired
+    private CouponService couponService;
 
-    public Event createEvent(EventRequestDTO data) {
+    @Autowired
+    private EventRepository repository;
+
+    public Event createEvent(EventRequestDTO data){
         String imgUrl = null;
 
-        if(data.image() != null) {
+        if(data.image() != null){
             imgUrl = this.uploadImg(data.image());
         }
 
@@ -49,19 +57,82 @@ public class EventService {
         newEvent.setImgUrl(imgUrl);
         newEvent.setRemote(data.remote());
 
-        eventRepository.save(newEvent);
+        repository.save(newEvent);
+
+        if(!data.remote()) {
+            this.addressService.createAddress(data, newEvent);
+        }
 
         return newEvent;
     }
 
     public List<EventResponseDTO> getUpcomingEvents(int page, int size){
         Pageable pageable = PageRequest.of(page, size);
-        Page<Event> eventsPage = this.eventRepository.findUpcomingEvents(new Date(), pageable);
-         return eventsPage.map(event -> new EventResponseDTO(event.getId(), event.getTitle(), event.getDescription(), event.getDate(),  "", "", event.getRemote(), event.getEventUrl(), event.getImgUrl()))
-                 .stream().toList();
+        Page<Event> eventsPage = this.repository.findUpcomingEvents(new Date(), pageable);
+        return eventsPage.map(event -> new EventResponseDTO(
+                        event.getId(),
+                        event.getTitle(),
+                        event.getDescription(),
+                        event.getDate(),
+                        event.getAddress() != null ? event.getAddress().getCity() : "",
+                        event.getAddress() != null ? event.getAddress().getUf() : "",
+                        event.getRemote(),
+                        event.getEventUrl(),
+                        event.getImgUrl())
+                )
+                .stream().toList();
     }
 
-    private String uploadImg(MultipartFile multipartFile) {
+    public EventDetailsDTO getEventDetails(UUID eventId) {
+        Event event = repository.findById(eventId)
+                .orElseThrow(() -> new IllegalArgumentException("Event not found"));
+
+        List<Coupon> coupons = couponService.consultCoupons(eventId, new Date());
+
+        List<EventDetailsDTO.CouponDTO> couponDTOs = coupons.stream()
+                .map(coupon -> new EventDetailsDTO.CouponDTO(
+                        coupon.getCode(),
+                        coupon.getDiscount(),
+                        coupon.getValid()))
+                .collect(Collectors.toList());
+
+        return new EventDetailsDTO(
+                event.getId(),
+                event.getTitle(),
+                event.getDescription(),
+                event.getDate(),
+                event.getAddress() != null ? event.getAddress().getCity() : "",
+                event.getAddress() != null ? event.getAddress().getUf() : "",
+                event.getImgUrl(),
+                event.getEventUrl(),
+                couponDTOs);
+    }
+
+    public List<EventResponseDTO> getFilteredEvents(int page, int size, String title, String city, String uf, Date startDate, Date endDate){
+        title = (title != null) ? title : "";
+        city = (city != null) ? city : "";
+        uf = (uf != null) ? uf : "";
+        startDate = (startDate != null) ? startDate : new Date(0);
+        endDate = (endDate != null) ? endDate : new Date();
+
+        Pageable pageable = PageRequest.of(page, size);
+
+        Page<Event> eventsPage = this.repository.findFilteredEvents(title, city, uf, startDate, endDate, pageable);
+        return eventsPage.map(event -> new EventResponseDTO(
+                        event.getId(),
+                        event.getTitle(),
+                        event.getDescription(),
+                        event.getDate(),
+                        event.getAddress() != null ? event.getAddress().getCity() : "",
+                        event.getAddress() != null ? event.getAddress().getUf() : "",
+                        event.getRemote(),
+                        event.getEventUrl(),
+                        event.getImgUrl())
+                )
+                .stream().toList();
+    }
+
+    private String uploadImg(MultipartFile multipartFile){
         String filename = UUID.randomUUID() + "-" + multipartFile.getOriginalFilename();
 
         try{
@@ -69,9 +140,9 @@ public class EventService {
             s3Client.putObject(bucketName, filename, file);
             file.delete();
             return s3Client.getUrl(bucketName, filename).toString();
-
-        } catch (Exception e) {
-            System.out.println("Erro ao subir arquivo");
+        } catch (Exception e){
+            System.out.println("erro ao subir arquivo");
+            System.out.println(e.getMessage());
             return "";
         }
     }
@@ -83,5 +154,4 @@ public class EventService {
         fos.close();
         return convFile;
     }
-
 }
